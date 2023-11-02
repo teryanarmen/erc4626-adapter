@@ -14,86 +14,176 @@
 
 pragma solidity ^0.8.0;
 
-import '@mimic-fi/v3-helpers/contracts/math/FixedPoint.sol';
+import '@openzeppelin/contracts/access/Ownable.sol';
 import '@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol';
+
+import '@mimic-fi/v3-helpers/contracts/math/FixedPoint.sol';
+
 import './interfaces/IERC4626Adapter.sol';
 
-contract ERC4626Adapter is ERC4626, IERC4626Adapter {
+/**
+ * @title ERC4626 adapter
+ * @dev Adapter used to track the accounting of investments made through ERC4626 implementations
+ */
+contract ERC4626Adapter is IERC4626Adapter, ERC4626, Ownable {
     using FixedPoint for uint256;
 
-    IERC4626 private immutable _erc4626;
-    uint256 private immutable _fee; //TODO: must be posible to reduce it
-    address private immutable _feeCollector; //TODO: must be posible to change it
+    // Reference to the ERC4626 contract
+    IERC4626 public immutable override erc4626;
 
-    uint256 private _totalInvested;
+    // Fee percentage
+    uint256 public override feePct;
 
-    constructor(
-        IERC4626 erc4626_,
-        uint256 fee_,
-        address feeCollector_
-    ) 
-    ERC20( IERC20Metadata(erc4626_.asset()).symbol(), IERC20Metadata(erc4626_.asset()).name())
-    ERC4626(IERC20Metadata(erc4626_.asset()))  {
-        _erc4626 = erc4626_;
-        _fee = fee_;
-        _feeCollector = feeCollector_;
+    // Fee collector
+    address public override feeCollector;
+
+    // Total amount of assets over which the fee has already been charged
+    uint256 public override previousTotalAssets;
+
+    /**
+     * @dev Creates a new ERC4626 adapter contract
+     * @param _erc4626 ERC4626 contract reference
+     * @param _feePct Fee percentage to be set
+     * @param _feeCollector Fee collector to be set
+     * @param owner Address that will own the ERC4626 adapter
+     */
+    constructor(IERC4626 _erc4626, uint256 _feePct, address _feeCollector, address owner)
+        ERC20(IERC20Metadata(_erc4626.asset()).symbol(), IERC20Metadata(_erc4626.asset()).name())
+        ERC4626(IERC20Metadata(_erc4626.asset()))
+    {
+        erc4626 = _erc4626;
+        _setFeePct(_feePct);
+        _setFeeCollector(_feeCollector);
+        _transferOwnership(owner);
     }
 
-    function totalInvested() public view returns (uint256) {
-        return _totalInvested;
+    /**
+     * @dev Tells the total amount of assets
+     */
+    function totalAssets() public view override(IERC4626, ERC4626) returns (uint256) {
+        return erc4626.totalAssets();
     }
 
-    function totalAssets() public view override(IERC4626, ERC4626)  returns (uint256) {
-        return _erc4626.totalAssets();
+    /**
+     * @dev Tells the total amount of shares
+     */
+    function totalSupply() public view override(IERC20, ERC20) returns (uint256) {
+        return super.totalSupply() + _pendingFeesInShareValue();
     }
 
+    /**
+     * @dev Tells the amount of shares of an account
+     */
+    function balanceOf(address account) public view override(IERC20, ERC20) returns (uint256) {
+        return super.balanceOf(account) + (account == feeCollector ? _pendingFeesInShareValue() : 0);
+    }
+
+    /**
+     * @dev Sets the fee percentage
+     * @param pct Fee percentage to be set
+     */
+    function setFeePct(uint256 pct) external override onlyOwner {
+        _setFeePct(pct);
+    }
+
+    /**
+     * @dev Sets the fee collector
+     * @param collector Fee collector to be set
+     */
+    function setFeeCollector(address collector) external override onlyOwner {
+        _setFeeCollector(collector);
+    }
+
+    /**
+     * @dev Deposits assets into an ERC4626 through the adapter
+     * @param caller Address of the caller
+     * @param receiver Address that will receive the shares
+     * @param assets Amount of assets to be deposited
+     * @param shares Amount of shares to be minted
+     */
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
         _settleFees();
 
-        super._deposit( caller,  receiver,  assets,  shares);
+        super._deposit(caller, receiver, assets, shares);
 
-        IERC20(_erc4626.asset()).approve(address(_erc4626), assets);
-        _erc4626.deposit(assets, address(this));
+        IERC20(erc4626.asset()).approve(address(erc4626), assets);
+        erc4626.deposit(assets, address(this));
 
-        _totalInvested = _erc4626.totalAssets();
+        previousTotalAssets = totalAssets();
     }
 
-    function _withdraw(
-        address caller,
-        address receiver,
-        address owner,
-        uint256 assets,
-        uint256 shares
-    ) internal override {
+    /**
+     * @dev Withdraws assets from an ERC4626 through the adapter
+     * @param caller Address of the caller
+     * @param receiver Address that will receive the assets
+     * @param owner Address that owns the shares
+     * @param assets Amount of assets to be withdrawn
+     * @param shares Amount of shares to be burnt
+     */
+    function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)
+        internal
+        override
+    {
         _settleFees();
 
-        _erc4626.withdraw(assets, address(this), address(this));
+        erc4626.withdraw(assets, address(this), address(this));
 
-        super._withdraw( caller,  receiver, owner, assets,  shares);
+        super._withdraw(caller, receiver, owner, assets, shares);
 
-        _totalInvested = _erc4626.totalAssets();
+        previousTotalAssets = totalAssets();
     }
 
-    function balanceOf(address account) public view override(IERC20, ERC20) returns (uint256) {
-        if(account == _feeCollector) {
-           return  super.balanceOf(account) + _pendingSharesFeeToCharge();
+    /**
+     * @dev Tells the fees in share value which have not been charged yet
+     */
+    function _pendingFeesInShareValue() internal view returns (uint256) {
+        uint256 currentTotalAssets = totalAssets();
+
+        // Note the following contemplates the scenario where there is no gain.
+        // Including the case of loss, which might be due to the underlying implementation not working as expected.
+        if (currentTotalAssets <= previousTotalAssets) return 0;
+        uint256 pendingFees = (currentTotalAssets - previousTotalAssets).mulUp(feePct);
+
+        // Note the following division uses `super.totalSupply` and not `totalSupply` (the overridden implementation).
+        // This means the total supply does not contemplate the `pendingFees`.
+        uint256 previousShareValue = (currentTotalAssets - pendingFees).divDown(super.totalSupply());
+
+        return pendingFees.divUp(previousShareValue);
+    }
+
+    /**
+     * @dev Settles the fees which have not been charged yet
+     */
+    function _settleFees() internal {
+        uint256 feeAmount = _pendingFeesInShareValue();
+        _mint(feeCollector, feeAmount);
+        emit FeesSettled(feeCollector, feeAmount);
+    }
+
+    /**
+     * @dev Sets the fee percentage
+     * @param newFeePct Fee percentage to be set
+     */
+    function _setFeePct(uint256 newFeePct) internal {
+        if (newFeePct == 0) revert FeePctZero();
+
+        if (feePct == 0) {
+            if (newFeePct >= FixedPoint.ONE) revert FeePctAboveOne();
+        } else {
+            if (newFeePct >= feePct) revert FeePctAbovePrevious(newFeePct, feePct);
         }
-        return super.balanceOf(account);
+
+        feePct = newFeePct;
+        emit FeePctSet(newFeePct);
     }
 
-    function totalSupply() public view override(IERC20, ERC20) returns (uint256) {
-        return super.totalSupply() + _pendingSharesFeeToCharge();
+    /**
+     * @dev Sets the fee collector
+     * @param newFeeCollector Fee collector to be set
+     */
+    function _setFeeCollector(address newFeeCollector) internal {
+        if (newFeeCollector == address(0)) revert FeeCollectorZero();
+        feeCollector = newFeeCollector;
+        emit FeeCollectorSet(newFeeCollector);
     }
-
-    function _pendingSharesFeeToCharge() private view returns (uint256) {
-        if( _erc4626.totalAssets()  == 0 || _totalInvested == 0) return 0;
-        uint256 pendingAssetsFeeToCharge = (_erc4626.totalAssets() - _totalInvested).mulUp(_fee);
-        uint256 prevShareValue = (_erc4626.totalAssets() - pendingAssetsFeeToCharge).divDown(super.totalSupply());
-        return pendingAssetsFeeToCharge.divUp(prevShareValue);
-    }
-
-    function _settleFees() private {
-         _mint(_feeCollector, _pendingSharesFeeToCharge());
-    }
-
 }
