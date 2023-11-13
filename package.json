@@ -1,7 +1,7 @@
 {
   "name": "@mimic-fi/erc4626-adapter",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.1-rc.0",
   "license": "Private",
   "engines": {
     "node": ">=16.0.0"
