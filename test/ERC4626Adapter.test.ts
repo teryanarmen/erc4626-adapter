@@ -5,12 +5,16 @@ import {
   deploy,
   deployTokenMock,
   fp,
+  getSigner,
   getSigners,
+  NATIVE_TOKEN_ADDRESS,
   ZERO_ADDRESS,
 } from '@mimic-fi/v3-helpers'
 import { SignerWithAddress } from '@nomiclabs/hardhat-ethers/signers'
 import { expect } from 'chai'
 import { BigNumber, BigNumberish, Contract } from 'ethers'
+
+/* eslint-disable no-secrets/no-secrets */
 
 describe('ERC4626 Adapter', () => {
   let token: Contract, erc4626Mock: Contract, erc4626Adapter: Contract
@@ -57,7 +61,7 @@ describe('ERC4626 Adapter', () => {
       it('reverts', async () => {
         await expect(
           deploy('ERC4626Adapter', [erc4626Mock.address, newFeePct, ZERO_ADDRESS, ZERO_ADDRESS])
-        ).to.be.revertedWith('FeePctAboveOne')
+        ).to.be.revertedWith('ERC4626AdapterFeePctAboveOne')
       })
     })
   })
@@ -125,7 +129,7 @@ describe('ERC4626 Adapter', () => {
           const newFeePct = 0
 
           it('reverts', async () => {
-            await expect(erc4626Adapter.setFeePct(newFeePct)).to.be.revertedWith('FeePctZero')
+            await expect(erc4626Adapter.setFeePct(newFeePct)).to.be.revertedWith('ERC4626AdapterFeePctZero')
           })
         })
       })
@@ -134,7 +138,7 @@ describe('ERC4626 Adapter', () => {
         const newFeePct = fee.add(1)
 
         it('reverts', async () => {
-          await expect(erc4626Adapter.setFeePct(newFeePct)).to.be.revertedWith('FeePctAbovePrevious')
+          await expect(erc4626Adapter.setFeePct(newFeePct)).to.be.revertedWith('ERC4626AdapterFeePctAbovePrevious')
         })
       })
     })
@@ -146,6 +150,141 @@ describe('ERC4626 Adapter', () => {
 
       it('reverts', async () => {
         await expect(erc4626Adapter.setFeePct(0)).to.be.revertedWith('Ownable: caller is not the owner')
+      })
+    })
+  })
+
+  describe('rescueFunds', () => {
+    let recipient: SignerWithAddress
+
+    const amount = fp(10)
+
+    before('set recipient', async () => {
+      recipient = await getSigner()
+    })
+
+    context('when the sender is allowed', () => {
+      beforeEach('set sender', () => {
+        erc4626Adapter = erc4626Adapter.connect(owner)
+      })
+
+      context('when the token is not the zero address', () => {
+        context('when the token is not the underlying ERC4626', () => {
+          let token: Contract
+
+          before('deploy token', async () => {
+            token = await deployTokenMock('TKN')
+          })
+
+          context('when the recipient is not the zero address', () => {
+            context('when the amount is greater than zero', () => {
+              context('when withdrawing ERC20 tokens', async () => {
+                context('when the adapter has enough balance', async () => {
+                  beforeEach('mint tokens', async () => {
+                    await token.mint(erc4626Adapter.address, amount)
+                  })
+
+                  it('transfers the tokens to the recipient', async () => {
+                    const previousAdapterBalance = await token.balanceOf(erc4626Adapter.address)
+                    const previousRecipientBalance = await token.balanceOf(recipient.address)
+
+                    await erc4626Adapter.rescueFunds(token.address, recipient.address, amount)
+
+                    const currentAdapterBalance = await token.balanceOf(erc4626Adapter.address)
+                    expect(currentAdapterBalance).to.be.equal(previousAdapterBalance.sub(amount))
+
+                    const currentRecipientBalance = await token.balanceOf(recipient.address)
+                    expect(currentRecipientBalance).to.be.equal(previousRecipientBalance.add(amount))
+                  })
+
+                  it('emits an event', async () => {
+                    const tx = await erc4626Adapter.rescueFunds(token.address, recipient.address, amount)
+
+                    await assertEvent(tx, 'FundsRescued', {
+                      token,
+                      amount,
+                      recipient,
+                    })
+                  })
+                })
+
+                context('when the adapter does not have enough balance', async () => {
+                  it('reverts', async () => {
+                    await expect(
+                      erc4626Adapter.rescueFunds(token.address, recipient.address, amount)
+                    ).to.be.revertedWith('ERC20: transfer amount exceeds balance')
+                  })
+                })
+              })
+
+              context('when withdrawing native tokens', () => {
+                const token = NATIVE_TOKEN_ADDRESS
+
+                it('reverts', async () => {
+                  await expect(erc4626Adapter.rescueFunds(token, recipient.address, amount)).to.be.revertedWith(
+                    'Address: insufficient balance'
+                  )
+                })
+              })
+            })
+
+            context('when the amount is zero', () => {
+              const amount = 0
+
+              it('reverts', async () => {
+                await expect(erc4626Adapter.rescueFunds(token.address, recipient.address, amount)).to.be.revertedWith(
+                  'ERC4626AdapterAmountZero'
+                )
+              })
+            })
+          })
+
+          context('when the recipient is the zero address', () => {
+            const recipientAddr = ZERO_ADDRESS
+
+            it('reverts', async () => {
+              await expect(erc4626Adapter.rescueFunds(token.address, recipientAddr, amount)).to.be.revertedWith(
+                'ERC4626AdapterRecipientZero'
+              )
+            })
+          })
+        })
+
+        context('when the token is the underlying erc4626', () => {
+          let token: Contract
+
+          beforeEach('set token', async () => {
+            token = await erc4626Adapter.erc4626()
+          })
+
+          it('reverts', async () => {
+            await expect(erc4626Adapter.rescueFunds(token, recipient.address, amount)).to.be.revertedWith(
+              'ERC4626AdapterTokenERC4626'
+            )
+          })
+        })
+      })
+
+      context('when the token is the zero address', () => {
+        const token = ZERO_ADDRESS
+
+        it('reverts', async () => {
+          await expect(erc4626Adapter.rescueFunds(token, recipient.address, amount)).to.be.revertedWith(
+            'ERC4626AdapterTokenZero'
+          )
+        })
+      })
+    })
+
+    context('when the sender is not allowed', () => {
+      beforeEach('set sender', () => {
+        erc4626Adapter = erc4626Adapter.connect(other)
+      })
+
+      it('reverts', async () => {
+        await expect(erc4626Adapter.rescueFunds(ZERO_ADDRESS, recipient.address, 0)).to.be.revertedWith(
+          'Ownable: caller is not the owner'
+        )
       })
     })
   })
