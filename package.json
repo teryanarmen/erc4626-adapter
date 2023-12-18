@@ -43,6 +43,8 @@
   },
   "eslintConfig": {
     "extends": "eslint-config-mimic",
-    "ignorePatterns": ["dist"]
+    "ignorePatterns": [
+      "dist"
+    ]
   }
 }
