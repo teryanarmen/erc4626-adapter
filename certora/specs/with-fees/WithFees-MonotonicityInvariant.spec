@@ -1,8 +1,8 @@
 import "../summaries/MulDivSummary.spec";
-import "../summaries/ConvertFuncSummary.spec";
+import "../summaries/ConvertFuncSummaryBase.spec";
 
 using ERC20 as _ERC20;
-using ERC4626Simple as ERC4626;
+using ERC4626 as ERC4626;
 
 methods {
     function totalSupply() external returns uint256 envfree;
@@ -25,6 +25,9 @@ methods {
     function ERC4626.balanceOf(address) external returns uint256 envfree;
     function ERC4626.totalSupply() external returns uint256 envfree;
     function ERC4626.totalAssets() external returns uint256 envfree;
+
+    function decimals() external returns uint8 envfree;
+    function _ERC20.decimals() external returns uint8 envfree;
 }
 
 function safeAssumptions() {
